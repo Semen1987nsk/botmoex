@@ -528,19 +528,27 @@ async def update_channel(ticker):
 
 
 def is_trading_time():
-    """Проверить, идёт ли сейчас торговая сессия MOEX."""
+    """
+    Проверить, идёт ли сейчас торговая сессия MOEX.
+    Утренняя: 06:50-09:50, Основная: 10:00-18:50, Вечерняя: 19:00-23:50
+    Выходные: иногда биржа работает, поэтому не блокируем жёстко.
+    """
     # Получаем текущее время в МСК (UTC+3)
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     now_msk = now_utc + datetime.timedelta(hours=3)
     
-    # Выходные - нет торгов
-    if now_msk.weekday() >= 5:  # Суббота=5, Воскресенье=6
+    hour = now_msk.hour
+    
+    # Ночь 00:00 - 06:50 МСК - точно нет торгов
+    if hour < TRADING_START_HOUR:
         return False
     
-    # Проверяем часы торговли (10:00 - 18:50 МСК)
-    hour = now_msk.hour
-    if hour < TRADING_START_HOUR or hour >= TRADING_END_HOUR:
+    # После 23:50 - нет торгов (TRADING_END_HOUR = 24)
+    if hour >= TRADING_END_HOUR:
         return False
+    
+    # В выходные проверяем более мягко - работаем, но реже
+    # (биржа иногда открыта в выходные, API вернёт актуальные цены)
     
     return True
 
