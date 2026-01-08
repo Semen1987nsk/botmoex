@@ -535,7 +535,9 @@ async def monitoring_loop():
             # Обновляем каналы периодически
             if time.time() - last_channel_update > channel_update_interval:
                 logger.info("Updating channels...")
-                asyncio.create_task(update_all_channels())
+                await update_all_channels()
+                # Отправляем сводку после обновления каналов
+                await send_periodic_summary()
                 last_channel_update = time.time()
             
             # Проверяем цены батчами через Tinkoff (real-time)
@@ -546,6 +548,90 @@ async def monitoring_loop():
         except Exception as e:
             logger.error(f"Monitoring error: {e}")
             await asyncio.sleep(5)
+
+
+async def send_periodic_summary():
+    """Отправить сводку инструментов за пределами ±4σ."""
+    if not subscribers:
+        return
+    
+    # Получаем текущие цены
+    figis_with_channels = []
+    figi_to_ticker_local = {}
+    for ticker, data in instruments.items():
+        if data.get('upper') and data.get('figi'):
+            figis_with_channels.append(data['figi'])
+            figi_to_ticker_local[data['figi']] = ticker
+    
+    if not figis_with_channels:
+        return
+    
+    # Получаем цены батчами
+    all_prices = {}
+    for i in range(0, len(figis_with_channels), 100):
+        batch = figis_with_channels[i:i+100]
+        try:
+            prices = await tinkoff_client.get_last_prices_batch(batch)
+            all_prices.update(prices)
+        except Exception as e:
+            logger.error(f"Error getting prices for summary: {e}")
+    
+    # Находим инструменты за пределами канала
+    above_list = []
+    below_list = []
+    
+    for figi, price in all_prices.items():
+        if not price or price <= 0:
+            continue
+        ticker = figi_to_ticker_local.get(figi)
+        if not ticker:
+            continue
+        data = instruments.get(ticker)
+        if not data:
+            continue
+        
+        upper = data.get('upper', 0)
+        lower = data.get('lower', 0)
+        regression = data.get('regression', 0)
+        
+        if price > upper and regression > 0:
+            deviation = (price - regression) / regression * 100
+            above_list.append((ticker, price, deviation))
+        elif price < lower and regression > 0:
+            deviation = (price - regression) / regression * 100
+            below_list.append((ticker, price, deviation))
+    
+    # Если никого нет за каналом — не отправляем
+    if not above_list and not below_list:
+        return
+    
+    # Формируем сообщение
+    import datetime
+    now_msk = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
+    time_str = now_msk.strftime("%H:%M")
+    
+    lines = [f"📊 <b>ОБЗОР ({time_str})</b>\n"]
+    
+    if above_list:
+        above_list.sort(key=lambda x: -x[2])  # Сортировка по отклонению
+        lines.append(f"🔺 <b>ВЫШЕ +4σ ({len(above_list)}):</b>")
+        for ticker, price, dev in above_list[:10]:  # Макс 10
+            lines.append(f"  • {ticker} | {price:.2f} ({dev:+.1f}%)")
+        lines.append("")
+    
+    if below_list:
+        below_list.sort(key=lambda x: x[2])  # Сортировка по отклонению
+        lines.append(f"🔻 <b>НИЖЕ -4σ ({len(below_list)}):</b>")
+        for ticker, price, dev in below_list[:10]:  # Макс 10
+            lines.append(f"  • {ticker} | {price:.2f} ({dev:+.1f}%)")
+    
+    message = "\n".join(lines)
+    
+    for chat_id in subscribers:
+        try:
+            await bot.send_message(chat_id, message, parse_mode='HTML')
+        except Exception as e:
+            logger.error(f"Error sending summary to {chat_id}: {e}")
 
 
 async def check_prices_batch():
