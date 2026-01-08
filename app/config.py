@@ -12,3 +12,7 @@ CHAT_ID = os.getenv("CHAT_ID")
 TIMEFRAME = 10 
 REGRESSION_LENGTH = 200
 STD_DEV_MULTIPLIER = 4.0
+
+# Торговая сессия MOEX (МСК)
+TRADING_START_HOUR = 10  # 10:00 МСК
+TRADING_END_HOUR = 19    # 18:50 МСК (округляем до 19)

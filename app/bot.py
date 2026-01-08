@@ -1,12 +1,16 @@
 import asyncio
 import logging
 import time
+import datetime
 import pandas as pd
 from aiogram import Bot, Dispatcher, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from app.config import TINKOFF_TOKEN, TELEGRAM_TOKEN, TIMEFRAME, REGRESSION_LENGTH, STD_DEV_MULTIPLIER
+from app.config import (
+    TINKOFF_TOKEN, TELEGRAM_TOKEN, TIMEFRAME, REGRESSION_LENGTH, STD_DEV_MULTIPLIER,
+    TRADING_START_HOUR, TRADING_END_HOUR
+)
 from app.tinkoff_client import TinkoffClient
 from app.moex_client import MoexClient
 from app.analyzer import calculate_linreg_channel
@@ -523,15 +527,52 @@ async def update_channel(ticker):
         logger.debug(f"Error updating channel for {ticker}: {e}")
 
 
+def is_trading_time():
+    """Проверить, идёт ли сейчас торговая сессия MOEX."""
+    # Получаем текущее время в МСК (UTC+3)
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    now_msk = now_utc + datetime.timedelta(hours=3)
+    
+    # Выходные - нет торгов
+    if now_msk.weekday() >= 5:  # Суббота=5, Воскресенье=6
+        return False
+    
+    # Проверяем часы торговли (10:00 - 18:50 МСК)
+    hour = now_msk.hour
+    if hour < TRADING_START_HOUR or hour >= TRADING_END_HOUR:
+        return False
+    
+    return True
+
+
 async def monitoring_loop():
     """Основной цикл мониторинга."""
     global monitoring
     
     last_channel_update = time.time()
     channel_update_interval = TIMEFRAME * 60  # Обновление каналов раз в N минут
+    was_trading = False  # Для отслеживания начала сессии
     
     while monitoring:
         try:
+            # Проверяем, идёт ли торговая сессия
+            trading_now = is_trading_time()
+            
+            if not trading_now:
+                # Ночь или выходные - ждём 60 секунд вместо 1
+                if was_trading:
+                    logger.info("Trading session ended. Sleeping until next session...")
+                    was_trading = False
+                await asyncio.sleep(60)
+                continue
+            
+            # Торговая сессия началась
+            if not was_trading:
+                logger.info("Trading session started!")
+                was_trading = True
+                # Принудительно обновляем каналы в начале сессии
+                last_channel_update = 0
+            
             # Обновляем каналы периодически
             if time.time() - last_channel_update > channel_update_interval:
                 logger.info("Updating channels...")
