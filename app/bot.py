@@ -557,8 +557,7 @@ async def monitoring_loop():
     """Основной цикл мониторинга."""
     global monitoring
     
-    last_channel_update = time.time()
-    channel_update_interval = TIMEFRAME * 60  # Обновление каналов раз в N минут
+    last_candle_minute = -1  # Для отслеживания новых свечей
     was_trading = False  # Для отслеживания начала сессии
     
     while monitoring:
@@ -578,16 +577,21 @@ async def monitoring_loop():
             if not was_trading:
                 logger.info("Trading session started!")
                 was_trading = True
-                # Принудительно обновляем каналы в начале сессии
-                last_channel_update = 0
+                last_candle_minute = -1  # Сбросить для обновления
             
-            # Обновляем каналы периодически
-            if time.time() - last_channel_update > channel_update_interval:
-                logger.info("Updating channels...")
+            # Проверяем, закрылась ли новая 10-минутная свеча
+            # Свечи закрываются в :00, :10, :20, :30, :40, :50
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            now_msk = now_utc + datetime.timedelta(hours=3)
+            current_candle_minute = (now_msk.minute // TIMEFRAME) * TIMEFRAME
+            
+            if current_candle_minute != last_candle_minute:
+                # Новая свеча закрылась - обновляем каналы
+                logger.info(f"New candle closed at :{current_candle_minute:02d} - updating channels...")
                 await update_all_channels()
                 # Отправляем сводку после обновления каналов
                 await send_periodic_summary()
-                last_channel_update = time.time()
+                last_candle_minute = current_candle_minute
             
             # Проверяем цены батчами через Tinkoff (real-time)
             await check_prices_batch()
