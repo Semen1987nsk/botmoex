@@ -8,10 +8,10 @@ TINKOFF_TOKEN = os.getenv("TINKOFF_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 # Параметры стратегии
-# 10 минутные свечи
+# 10 минутные свечи - эквивалент 15м × 4σ × 200
 TIMEFRAME = 10 
-REGRESSION_LENGTH = 200
-STD_DEV_MULTIPLIER = 4.5
+REGRESSION_LENGTH = 300
+STD_DEV_MULTIPLIER = 3.8
 
 # Торговая сессия MOEX (МСК)
 # Утренняя: 06:50-09:50, Основная: 10:00-18:50, Вечерняя: 19:00-23:50
