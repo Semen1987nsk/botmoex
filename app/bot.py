@@ -355,7 +355,8 @@ async def load_instruments():
                     'board': 'TQBR',
                     'upper': None,
                     'lower': None,
-                    'last_signal_type': None
+                    'last_signal_type': None,
+                    'last_signal_candle': None
                 }
                 figi_to_ticker[figi] = ticker
         
@@ -372,7 +373,8 @@ async def load_instruments():
                     'board': 'RFUD',
                     'upper': None,
                     'lower': None,
-                    'last_signal_type': None
+                    'last_signal_type': None,
+                    'last_signal_candle': None
                 }
                 figi_to_ticker[figi] = ticker
         
