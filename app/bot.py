@@ -723,18 +723,31 @@ async def check_breakout(ticker, current_price):
     upper = data['upper']
     lower = data['lower']
     last_signal = data.get('last_signal_type')
+    last_signal_candle = data.get('last_signal_candle')
+    
+    # Определяем текущую свечу (номер 10-минутки)
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    now_msk = now_utc + datetime.timedelta(hours=3)
+    current_candle = now_msk.strftime('%Y-%m-%d') + f"_{now_msk.hour:02d}:{(now_msk.minute // TIMEFRAME) * TIMEFRAME:02d}"
     
     signal_type = None
+    
+    # Один сигнал за свечу: если уже был сигнал в этой свече - пропускаем
+    if last_signal_candle == current_candle:
+        return
     
     if current_price > upper and last_signal != 'up':
         signal_type = 'up'
         instruments[ticker]['last_signal_type'] = 'up'
+        instruments[ticker]['last_signal_candle'] = current_candle
         
     elif current_price < lower and last_signal != 'down':
         signal_type = 'down'
         instruments[ticker]['last_signal_type'] = 'down'
+        instruments[ticker]['last_signal_candle'] = current_candle
         
     elif lower <= current_price <= upper:
+        # Цена вернулась в канал - сбрасываем тип сигнала, но НЕ свечу
         instruments[ticker]['last_signal_type'] = None
     
     if signal_type:
