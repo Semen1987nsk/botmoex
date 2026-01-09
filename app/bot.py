@@ -479,19 +479,20 @@ async def format_extremes_message(extremes_up, extremes_down):
 
 
 async def update_channel(ticker):
-    """Обновить канал для одного инструмента через Tinkoff (свежие данные)."""
+    """Обновить канал для одного инструмента (гибридно: MOEX история + Tinkoff сегодня)."""
     data = instruments.get(ticker)
     if not data or not data.get('figi'):
         return
     
     try:
         # Гибридная загрузка: MOEX (история) + Tinkoff (сегодня)
+        # Это экономит API лимиты Tinkoff
         ticker_data = instruments[ticker]
         engine = ticker_data.get('engine', 'stock')
         market = ticker_data.get('market', 'shares')
         board = ticker_data.get('board', 'TQBR')
         
-        # 1. MOEX: история до вчера (без лимитов)
+        # 1. MOEX: история до вчера (без лимитов API)
         df_moex = await moex_client.get_candles_until_today(
             engine, market, board, ticker, interval=TIMEFRAME, days_back=10
         )
@@ -525,6 +526,8 @@ async def update_channel(ticker):
                 instruments[ticker]['last_volume'] = last_candle.get('volume', 0)
                 instruments[ticker]['last_candle_price'] = last_candle.get('close', 0)
                 instruments[ticker]['last_candle_time'] = last_candle.get('begin', '')
+    except Exception as e:
+        logger.debug(f"Error updating channel for {ticker}: {e}")
     except Exception as e:
         logger.debug(f"Error updating channel for {ticker}: {e}")
 

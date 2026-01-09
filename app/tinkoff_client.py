@@ -91,6 +91,51 @@ class TinkoffClient:
                 for i in instruments.instruments
             ]
 
+    async def get_candles_exchange(self, figi, interval_mins=10, period_days=10, max_retries=3):
+        """
+        Получить биржевые свечи (EXCHANGE) за последние N дней.
+        Время в МСК. Это основной метод для расчёта каналов.
+        """
+        tf = INTERVAL_MAPPING.get(interval_mins, CandleInterval.CANDLE_INTERVAL_10_MIN)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        start = now - datetime.timedelta(days=period_days)
+        
+        for attempt in range(max_retries):
+            try:
+                candles_list = []
+                async with AsyncClient(self.token) as client:
+                    async for candle in client.get_all_candles(
+                        figi=figi,
+                        from_=start,
+                        to=now,
+                        interval=tf,
+                        candle_source_type=CandleSource.CANDLE_SOURCE_EXCHANGE
+                    ):
+                        # Конвертируем UTC -> МСК
+                        msk_time = candle.time + datetime.timedelta(hours=3)
+                        candles_list.append({
+                            'begin': msk_time.replace(tzinfo=None),
+                            'open': candle.open.units + candle.open.nano / 1e9,
+                            'close': candle.close.units + candle.close.nano / 1e9,
+                            'high': candle.high.units + candle.high.nano / 1e9,
+                            'low': candle.low.units + candle.low.nano / 1e9,
+                            'volume': candle.volume
+                        })
+                
+                df = pd.DataFrame(candles_list)
+                if len(df) > 0:
+                    df = df.sort_values('begin').reset_index(drop=True)
+                return df
+                
+            except Exception as e:
+                if 'RESOURCE_EXHAUSTED' in str(e):
+                    wait_time = (attempt + 1) * 5
+                    await asyncio.sleep(wait_time)
+                else:
+                    raise
+        
+        return pd.DataFrame()
+
     async def get_candles(self, figi, interval_mins=10, period_days=10, max_retries=3):
         """Получить свечи за последние N дней с кэшированием и retry."""
         tf = INTERVAL_MAPPING.get(interval_mins, CandleInterval.CANDLE_INTERVAL_10_MIN)

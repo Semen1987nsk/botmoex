@@ -34,7 +34,7 @@ def calculate_ema(closes, period=50):
     return ema.iloc[-1]
 
 
-def calculate_linreg_channel(df, length=200, std_dev_mult=4.0):
+def calculate_linreg_channel(df, length=200, std_dev_mult=4.5):
     """
     Расчет канала линейной регрессии (стиль TradingView/Финам):
     - Линейная регрессия по Close
