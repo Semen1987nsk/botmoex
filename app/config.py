@@ -11,7 +11,7 @@ CHAT_ID = os.getenv("CHAT_ID")
 # 10 минутные свечи
 TIMEFRAME = 10 
 REGRESSION_LENGTH = 200
-STD_DEV_MULTIPLIER = 4.0
+STD_DEV_MULTIPLIER = 4.5
 
 # Торговая сессия MOEX (МСК)
 # Утренняя: 06:50-09:50, Основная: 10:00-18:50, Вечерняя: 19:00-23:50
