@@ -115,7 +115,7 @@ class MoexClient:
     async def get_candles_until_today(self, engine, market, board, symbol, interval=10, days_back=10):
         """
         Получить свечи до начала сегодняшнего дня (для гибридной загрузки).
-        Возвращает данные в формате совместимом с Tinkoff (begin, open, high, low, close, volume).
+        Использует пагинацию для получения всех свечей (MOEX лимит 500 за запрос).
         """
         url = f"{BASE_URL}/engines/{engine}/markets/{market}/boards/{board}/securities/{symbol}/candles.json"
         
@@ -126,30 +126,48 @@ class MoexClient:
         yesterday = datetime.date.today() - datetime.timedelta(days=1)
         end_date_str = yesterday.strftime('%Y-%m-%d')
         
-        params = {
-            'interval': interval,
-            'from': start_date_str,
-            'till': end_date_str
-        }
+        all_rows = []
+        start_offset = 0
         
-        try:
-            data = await self.get_json(url, params=params)
-            cols = data['candles']['columns']
-            rows = data['candles']['data']
-            df = pd.DataFrame(rows, columns=cols)
+        while True:
+            params = {
+                'interval': interval,
+                'from': start_date_str,
+                'till': end_date_str,
+                'start': start_offset
+            }
             
-            if not df.empty:
-                df['begin'] = pd.to_datetime(df['begin'])
-                df['close'] = pd.to_numeric(df['close'])
-                df['open'] = pd.to_numeric(df['open'])
-                df['high'] = pd.to_numeric(df['high'])
-                df['low'] = pd.to_numeric(df['low'])
-                # Переименуем volume если нужно
-                if 'volume' not in df.columns and 'value' in df.columns:
-                    df['volume'] = df['value']
-            
-            return df
-        except Exception as e:
-            print(f"Error fetching history for {symbol}: {e}")
+            try:
+                data = await self.get_json(url, params=params)
+                cols = data['candles']['columns']
+                rows = data['candles']['data']
+                
+                if not rows:
+                    break
+                    
+                all_rows.extend(rows)
+                
+                # MOEX возвращает максимум 500 свечей за запрос
+                if len(rows) < 500:
+                    break
+                    
+                start_offset += len(rows)
+                
+            except Exception as e:
+                print(f"Error fetching history for {symbol}: {e}")
+                break
+        
+        if not all_rows:
             return pd.DataFrame()
+            
+        df = pd.DataFrame(all_rows, columns=cols)
+        df['begin'] = pd.to_datetime(df['begin'])
+        df['close'] = pd.to_numeric(df['close'])
+        df['open'] = pd.to_numeric(df['open'])
+        df['high'] = pd.to_numeric(df['high'])
+        df['low'] = pd.to_numeric(df['low'])
+        if 'volume' not in df.columns and 'value' in df.columns:
+            df['volume'] = df['value']
+        
+        return df
 

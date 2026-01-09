@@ -85,7 +85,7 @@ async def cmd_scan(message: Message):
     await message.answer(
         f"🔍 <b>Мониторинг запущен!</b>\n"
         f"Проверка цен каждую секунду.\n\n"
-        f"<i>Сигналы будут приходить при НОВЫХ пробоях канала ±3.8σ</i>",
+        f"<i>Сигналы будут приходить при НОВЫХ пробоях канала ±3.5σ</i>",
         parse_mode='HTML'
     )
     
@@ -130,9 +130,9 @@ async def cmd_check(message: Message):
             
             # Статус относительно канала
             if price > channel['upper']:
-                status = "🔺 ВЫШЕ +3.8σ"
+                status = "🔺 ВЫШЕ +3.5σ"
             elif price < channel['lower']:
-                status = "🔻 НИЖЕ -3.8σ"
+                status = "🔻 НИЖЕ -3.5σ"
             else:
                 status = "✅ Внутри канала"
             
@@ -153,8 +153,8 @@ async def cmd_check(message: Message):
                 f"<b>{ticker}</b> | {name}\n"
                 f"  💰 Цена: {price:.2f}\n"
                 f"  📊 Регрессия: {channel['regression']:.2f}\n"
-                f"  ⬆️ Верх (+3.8σ): {channel['upper']:.2f}\n"
-                f"  ⬇️ Низ (-3.8σ): {channel['lower']:.2f}\n"
+                f"  ⬆️ Верх (+3.5σ): {channel['upper']:.2f}\n"
+                f"  ⬇️ Низ (-3.5σ): {channel['lower']:.2f}\n"
                 f"  📐 EMA50: {ema_str} ({ema_status})\n"
                 f"  {trend} Тренд | {status}\n"
                 f"  📊 Свечей: {len(df)}"
@@ -249,9 +249,9 @@ async def cmd_ticker(message: Message):
         
         # Статус относительно канала
         if price > channel['upper']:
-            status = "🔺 ВЫШЕ +3.8σ"
+            status = "🔺 ВЫШЕ +3.5σ"
         elif price < channel['lower']:
-            status = "🔻 НИЖЕ -3.8σ"
+            status = "🔻 НИЖЕ -3.5σ"
         else:
             status = "✅ Внутри канала"
         
@@ -290,8 +290,8 @@ async def cmd_ticker(message: Message):
             f"<i>{instr_type.capitalize()}</i>\n\n"
             f"💰 Цена: <b>{price:.2f}</b>\n"
             f"📊 Регрессия: {channel['regression']:.2f}\n"
-            f"⬆️ Верх (+3.8σ): {channel['upper']:.2f}\n"
-            f"⬇️ Низ (-3.8σ): {channel['lower']:.2f}\n"
+            f"⬆️ Верх (+3.5σ): {channel['upper']:.2f}\n"
+            f"⬇️ Низ (-3.5σ): {channel['lower']:.2f}\n"
             f"📐 EMA50: {ema_str} ({ema_status})\n"
             f"💹 Оборот (10м): {turnover_str}\n"
             f"{trend} Тренд | <b>{status}</b>\n\n"
@@ -456,19 +456,19 @@ async def get_current_extremes():
 async def format_extremes_message(extremes_up, extremes_down):
     """Форматировать сообщение со списком экстремальных позиций."""
     if not extremes_up and not extremes_down:
-        return "✅ <b>Все инструменты внутри каналов ±3.8σ</b>"
+        return "✅ <b>Все инструменты внутри каналов ±3.5σ</b>"
     
-    lines = ["📊 <b>ТЕКУЩИЕ ПОЗИЦИИ ЗА ПРЕДЕЛАМИ ±3.8σ</b>\n"]
+    lines = ["📊 <b>ТЕКУЩИЕ ПОЗИЦИИ ЗА ПРЕДЕЛАМИ ±3.5σ</b>\n"]
     
     if extremes_up:
-        lines.append(f"\n🔺 <b>ВЫШЕ +3.8σ ({len(extremes_up)}):</b>")
+        lines.append(f"\n🔺 <b>ВЫШЕ +3.5σ ({len(extremes_up)}):</b>")
         for item in extremes_up[:15]:  # Максимум 15
             lines.append(f"  • <b>{item['ticker']}</b> | {item['price']:.2f} ({item['deviation']:+.1f}%)")
         if len(extremes_up) > 15:
             lines.append(f"  ... и ещё {len(extremes_up) - 15}")
     
     if extremes_down:
-        lines.append(f"\n🔻 <b>НИЖЕ -3.8σ ({len(extremes_down)}):</b>")
+        lines.append(f"\n🔻 <b>НИЖЕ -3.5σ ({len(extremes_down)}):</b>")
         for item in extremes_down[:15]:  # Максимум 15
             lines.append(f"  • <b>{item['ticker']}</b> | {item['price']:.2f} ({item['deviation']:+.1f}%)")
         if len(extremes_down) > 15:
@@ -613,7 +613,7 @@ async def monitoring_loop():
 
 
 async def send_periodic_summary():
-    """Отправить сводку инструментов за пределами ±3.8σ."""
+    """Отправить сводку инструментов за пределами ±3.5σ."""
     if not subscribers:
         return
     
@@ -676,14 +676,14 @@ async def send_periodic_summary():
     
     if above_list:
         above_list.sort(key=lambda x: -x[2])  # Сортировка по отклонению
-        lines.append(f"🔺 <b>ВЫШЕ +3.8σ ({len(above_list)}):</b>")
+        lines.append(f"🔺 <b>ВЫШЕ +3.5σ ({len(above_list)}):</b>")
         for ticker, price, dev in above_list[:10]:  # Макс 10
             lines.append(f"  • {ticker} | {price:.2f} ({dev:+.1f}%)")
         lines.append("")
     
     if below_list:
         below_list.sort(key=lambda x: x[2])  # Сортировка по отклонению
-        lines.append(f"🔻 <b>НИЖЕ -3.8σ ({len(below_list)}):</b>")
+        lines.append(f"🔻 <b>НИЖЕ -3.5σ ({len(below_list)}):</b>")
         for ticker, price, dev in below_list[:10]:  # Макс 10
             lines.append(f"  • {ticker} | {price:.2f} ({dev:+.1f}%)")
     
@@ -835,8 +835,8 @@ async def send_signal(ticker, data, price, signal_type):
         f"📋 {type_name}\n\n"
         f"💰 <b>Цена: {price:.2f}</b>\n"
         f"📊 Регрессия: {regression:.2f} ({deviation_pct:+.1f}%)\n"
-        f"⬆️ Верх (+3.8σ): {data['upper']:.2f}\n"
-        f"⬇️ Низ (-3.8σ): {data['lower']:.2f}\n"
+        f"⬆️ Верх (+3.5σ): {data['upper']:.2f}\n"
+        f"⬇️ Низ (-3.5σ): {data['lower']:.2f}\n"
         f"📏 Ширина канала: {channel_pct:.1f}%\n"
         f"💹 Оборот (10м): {turnover_str}\n\n"
     )

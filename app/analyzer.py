@@ -34,7 +34,7 @@ def calculate_ema(closes, period=50):
     return ema.iloc[-1]
 
 
-def calculate_linreg_realtime(closes_299, current_price, std_dev_mult=3.8):
+def calculate_linreg_realtime(closes_299, current_price, std_dev_mult=3.5):
     """
     Realtime расчёт регрессии (как в Finam).
     Берём 199 закрытых свечей + текущую цену = 200 точек.
@@ -69,7 +69,7 @@ def calculate_linreg_realtime(closes_299, current_price, std_dev_mult=3.8):
     }
 
 
-def calculate_linreg_channel(df, length=200, std_dev_mult=3.8):
+def calculate_linreg_channel(df, length=200, std_dev_mult=3.5):
     """
     Расчет канала линейной регрессии (стиль TradingView/Финам):
     - Линейная регрессия по Close
