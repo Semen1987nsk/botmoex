@@ -34,6 +34,41 @@ def calculate_ema(closes, period=50):
     return ema.iloc[-1]
 
 
+def calculate_linreg_realtime(closes_199, current_price, std_dev_mult=4.5):
+    """
+    Realtime расчёт регрессии (как в Finam).
+    Берём 199 закрытых свечей + текущую цену = 200 точек.
+    Пересчитываем регрессию полностью.
+    """
+    # Добавляем текущую цену как 200-ю точку
+    y = np.append(closes_199, current_price)
+    x = np.arange(len(y))
+    
+    # Линейная регрессия
+    A = np.vstack([x, np.ones(len(x))]).T
+    m, c = np.linalg.lstsq(A, y, rcond=None)[0]
+    
+    # Линия регрессии
+    regression_line = m * x + c
+    
+    # STD от остатков
+    residuals = y - regression_line
+    std_dev = np.std(residuals, ddof=0)
+    
+    # Значения на последней точке
+    regression = regression_line[-1]
+    upper = regression + (std_dev * std_dev_mult)
+    lower = regression - (std_dev * std_dev_mult)
+    
+    return {
+        'upper': upper,
+        'lower': lower,
+        'regression': regression,
+        'std': std_dev,
+        'slope': m
+    }
+
+
 def calculate_linreg_channel(df, length=200, std_dev_mult=4.5):
     """
     Расчет канала линейной регрессии (стиль TradingView/Финам):

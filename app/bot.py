@@ -3,6 +3,7 @@ import logging
 import time
 import datetime
 import pandas as pd
+import numpy as np
 from aiogram import Bot, Dispatcher, Router
 from aiogram.filters import Command
 from aiogram.types import Message
@@ -13,7 +14,7 @@ from app.config import (
 )
 from app.tinkoff_client import TinkoffClient
 from app.moex_client import MoexClient
-from app.analyzer import calculate_linreg_channel
+from app.analyzer import calculate_linreg_channel, calculate_linreg_realtime
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -26,7 +27,7 @@ dp: Dispatcher = None
 monitoring = False
 subscribers = set()  # Чат-id для уведомлений
 
-# ticker -> {figi, name, type, board, engine, market, upper, lower, last_signal_type}
+# ticker -> {figi, name, type, board, engine, market, upper, lower, last_signal_type, closes_199}
 instruments = {}
 
 # figi -> ticker (для быстрого поиска)
@@ -521,13 +522,16 @@ async def update_channel(ticker):
                 instruments[ticker]['ema50'] = channel['ema50']
                 instruments[ticker]['slope'] = channel['slope']
                 instruments[ticker]['std'] = channel['std']
+                
+                # Сохраняем последние 199 closes для realtime пересчёта
+                closes = df['close'].values
+                instruments[ticker]['closes_199'] = closes[-(REGRESSION_LENGTH-1):]
+                
                 # Сохраняем данные последней свечи для оборота
                 last_candle = df.iloc[-1]
                 instruments[ticker]['last_volume'] = last_candle.get('volume', 0)
                 instruments[ticker]['last_candle_price'] = last_candle.get('close', 0)
                 instruments[ticker]['last_candle_time'] = last_candle.get('begin', '')
-    except Exception as e:
-        logger.debug(f"Error updating channel for {ticker}: {e}")
     except Exception as e:
         logger.debug(f"Error updating channel for {ticker}: {e}")
 
@@ -720,13 +724,31 @@ async def check_prices_batch():
 
 
 async def check_breakout(ticker, current_price):
-    """Проверить пробой для инструмента."""
+    """Проверить пробой для инструмента с realtime пересчётом канала."""
     data = instruments.get(ticker)
-    if not data or not data.get('upper'):
+    if not data:
         return
     
-    upper = data['upper']
-    lower = data['lower']
+    closes_199 = data.get('closes_199')
+    if closes_199 is None or len(closes_199) < REGRESSION_LENGTH - 1:
+        # Нет данных для realtime — используем сохранённые границы
+        if not data.get('upper'):
+            return
+        upper = data['upper']
+        lower = data['lower']
+        regression = data.get('regression', 0)
+    else:
+        # Realtime пересчёт с текущей ценой (как в Finam)
+        channel = calculate_linreg_realtime(closes_199, current_price, STD_DEV_MULTIPLIER)
+        upper = channel['upper']
+        lower = channel['lower']
+        regression = channel['regression']
+        # Обновляем данные для отображения в сигнале
+        instruments[ticker]['upper'] = upper
+        instruments[ticker]['lower'] = lower
+        instruments[ticker]['regression'] = regression
+        instruments[ticker]['std'] = channel['std']
+    
     last_signal = data.get('last_signal_type')
     last_signal_candle = data.get('last_signal_candle')
     
