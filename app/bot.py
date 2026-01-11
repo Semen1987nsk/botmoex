@@ -33,6 +33,9 @@ instruments = {}
 # figi -> ticker (для быстрого поиска)
 figi_to_ticker = {}
 
+# Для отслеживания изменений в сводке (чтобы не спамить одинаковыми сообщениями)
+last_summary_tickers = set()  # Набор тикеров из последней сводки
+
 tinkoff_client = None
 moex_client = None
 
@@ -540,18 +543,13 @@ def is_trading_time():
     """
     Проверить, идёт ли сейчас торговая сессия MOEX.
     Утренняя: 06:50-09:50, Основная: 10:00-18:50, Вечерняя: 19:00-23:50
-    Выходные (суббота, воскресенье): биржа закрыта.
+    Выходные: биржа иногда работает, поэтому не блокируем.
     """
     # Получаем текущее время в МСК (UTC+3)
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     now_msk = now_utc + datetime.timedelta(hours=3)
     
     hour = now_msk.hour
-    weekday = now_msk.weekday()  # 0=Пн, 1=Вт, ..., 5=Сб, 6=Вс
-    
-    # Выходные - биржа закрыта
-    if weekday >= 5:  # Суббота (5) или Воскресенье (6)
-        return False
     
     # Ночь 00:00 - 06:50 МСК - точно нет торгов
     if hour < TRADING_START_HOUR:
@@ -615,7 +613,9 @@ async def monitoring_loop():
 
 
 async def send_periodic_summary():
-    """Отправить сводку инструментов за пределами ±3.5σ."""
+    """Отправить сводку инструментов за пределами ±3.5σ (только если изменилась)."""
+    global last_summary_tickers
+    
     if not subscribers:
         return
     
@@ -667,7 +667,19 @@ async def send_periodic_summary():
     
     # Если никого нет за каналом — не отправляем
     if not above_list and not below_list:
+        last_summary_tickers = set()  # Сбрасываем, чтобы при появлении отправить
         return
+    
+    # Проверяем, изменился ли список тикеров
+    current_tickers = set([t[0] for t in above_list] + [t[0] for t in below_list])
+    
+    if current_tickers == last_summary_tickers:
+        # Список не изменился — не спамим одинаковыми сообщениями
+        logger.debug(f"Summary unchanged: {current_tickers}")
+        return
+    
+    # Список изменился — обновляем и отправляем
+    last_summary_tickers = current_tickers
     
     # Формируем сообщение
     import datetime
