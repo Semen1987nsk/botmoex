@@ -540,13 +540,18 @@ def is_trading_time():
     """
     Проверить, идёт ли сейчас торговая сессия MOEX.
     Утренняя: 06:50-09:50, Основная: 10:00-18:50, Вечерняя: 19:00-23:50
-    Выходные: иногда биржа работает, поэтому не блокируем жёстко.
+    Выходные (суббота, воскресенье): биржа закрыта.
     """
     # Получаем текущее время в МСК (UTC+3)
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     now_msk = now_utc + datetime.timedelta(hours=3)
     
     hour = now_msk.hour
+    weekday = now_msk.weekday()  # 0=Пн, 1=Вт, ..., 5=Сб, 6=Вс
+    
+    # Выходные - биржа закрыта
+    if weekday >= 5:  # Суббота (5) или Воскресенье (6)
+        return False
     
     # Ночь 00:00 - 06:50 МСК - точно нет торгов
     if hour < TRADING_START_HOUR:
@@ -555,9 +560,6 @@ def is_trading_time():
     # После 23:50 - нет торгов (TRADING_END_HOUR = 24)
     if hour >= TRADING_END_HOUR:
         return False
-    
-    # В выходные проверяем более мягко - работаем, но реже
-    # (биржа иногда открыта в выходные, API вернёт актуальные цены)
     
     return True
 
