@@ -764,32 +764,37 @@ async def check_breakout(ticker, current_price):
         instruments[ticker]['std'] = channel['std']
     
     last_signal = data.get('last_signal_type')
-    last_signal_candle = data.get('last_signal_candle')
+    last_signal_time = data.get('last_signal_time')  # Время последнего сигнала
     
-    # Определяем текущую свечу (номер 10-минутки)
+    # Минимальный интервал между сигналами — 4 свечи (40 минут)
+    MIN_SIGNAL_INTERVAL_CANDLES = 4
+    min_interval_minutes = MIN_SIGNAL_INTERVAL_CANDLES * TIMEFRAME
+    
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    now_msk = now_utc + datetime.timedelta(hours=3)
-    current_candle = now_msk.strftime('%Y-%m-%d') + f"_{now_msk.hour:02d}:{(now_msk.minute // TIMEFRAME) * TIMEFRAME:02d}"
+    
+    # Проверяем, прошло ли достаточно времени с последнего сигнала
+    if last_signal_time:
+        minutes_since_signal = (now_utc - last_signal_time).total_seconds() / 60
+        if minutes_since_signal < min_interval_minutes:
+            # Ещё не прошло 4 свечи — не отправляем повторный сигнал
+            return
     
     signal_type = None
-    
-    # Один сигнал за свечу: если уже был сигнал в этой свече - пропускаем
-    if last_signal_candle == current_candle:
-        return
     
     if current_price > upper and last_signal != 'up':
         signal_type = 'up'
         instruments[ticker]['last_signal_type'] = 'up'
-        instruments[ticker]['last_signal_candle'] = current_candle
+        instruments[ticker]['last_signal_time'] = now_utc
         
     elif current_price < lower and last_signal != 'down':
         signal_type = 'down'
         instruments[ticker]['last_signal_type'] = 'down'
-        instruments[ticker]['last_signal_candle'] = current_candle
+        instruments[ticker]['last_signal_time'] = now_utc
         
     elif lower <= current_price <= upper:
-        # Цена вернулась в канал - сбрасываем тип сигнала, но НЕ свечу
+        # Цена вернулась в канал - сбрасываем тип сигнала
         instruments[ticker]['last_signal_type'] = None
+        # НЕ сбрасываем last_signal_time — интервал всё равно должен соблюдаться
     
     if signal_type:
         await send_signal(ticker, data, current_price, signal_type)
