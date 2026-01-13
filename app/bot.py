@@ -45,13 +45,19 @@ async def cmd_start(message: Message):
     subscribers.add(message.chat.id)
     await message.answer(
         "🤖 MOEX Breakout Monitor\n\n"
-        "Мониторинг пробоев линейных регрессионных каналов (±3.5σ) на 10-минутках.\n\n"
-        "Команды:\n"
+        "Мониторинг пробоев линейных регрессионных каналов.\n\n"
+        "<b>📊 Мониторинг (10м, ±3.5σ):</b>\n"
         "/scan - Запустить мониторинг\n"
         "/stop - Остановить мониторинг\n"
-        "/status - Статус бота\n"
+        "/status - Статус бота\n\n"
+        "<b>🔍 Проверка тикеров:</b>\n"
         "/check - Проверить OZON, GAZP, SFIN\n"
-        "/ticker SBER - Проверить любой тикер"
+        "/ticker SBER - Проверить любой тикер\n\n"
+        "<b>📈 Анализ (200 свечей, ±2σ):</b>\n"
+        "/daily - Топ-25 ближайших к границам (дневки)\n"
+        "/weekly - Топ-25 ближайших к границам (недельки)\n"
+        "/nearest - Топ-25 ближайших (10-минутки)",
+        parse_mode='HTML'
     )
 
 
@@ -103,6 +109,223 @@ async def cmd_stop(message: Message):
     await message.answer("⛔ Мониторинг остановлен")
 
 
+@router.message(Command("daily"))
+async def cmd_daily(message: Message):
+    """Топ-25 инструментов ближайших к границам на дневках (D1, 200 свечей, ±2σ)."""
+    await message.answer("⏳ Анализирую дневные графики (D1, 200 свечей, ±2σ)...")
+    
+    try:
+        result = await analyze_timeframe(
+            interval=24,  # Дневки в MOEX API
+            interval_name="D1",
+            length=200,
+            std_mult=2.0,
+            top_n=25
+        )
+        await message.answer(result, parse_mode='HTML')
+    except Exception as e:
+        logger.error(f"Error in /daily: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)[:100]}")
+
+
+@router.message(Command("weekly"))
+async def cmd_weekly(message: Message):
+    """Топ-25 инструментов ближайших к границам на недельках (W1, 200 свечей, ±2σ)."""
+    await message.answer("⏳ Анализирую недельные графики (W1, 200 свечей, ±2σ)...\n<i>Это может занять несколько минут</i>", parse_mode='HTML')
+    
+    try:
+        result = await analyze_timeframe(
+            interval=7,  # Недельки (7 дней)
+            interval_name="W1",
+            length=200,
+            std_mult=2.0,
+            top_n=25
+        )
+        await message.answer(result, parse_mode='HTML')
+    except Exception as e:
+        logger.error(f"Error in /weekly: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)[:100]}")
+
+
+@router.message(Command("nearest"))
+async def cmd_nearest(message: Message):
+    """Топ-25 инструментов ближайших к границам на 10-минутках."""
+    await message.answer("⏳ Ищу ближайшие к границам (10м, 300 свечей, ±3.5σ)...")
+    
+    try:
+        result = await analyze_timeframe(
+            interval=10,
+            interval_name="10M",
+            length=REGRESSION_LENGTH,
+            std_mult=STD_DEV_MULTIPLIER,
+            top_n=25
+        )
+        await message.answer(result, parse_mode='HTML')
+    except Exception as e:
+        logger.error(f"Error in /nearest: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)[:100]}")
+
+
+async def analyze_timeframe(interval: int, interval_name: str, length: int, std_mult: float, top_n: int = 25) -> str:
+    """
+    Анализировать инструменты на заданном таймфрейме.
+    Возвращает топ инструментов ближайших к границам канала.
+    
+    interval: 10 (минуты), 24 (день), 7 (неделя - особая обработка)
+    """
+    # Получаем список акций
+    shares = await tinkoff_client.get_all_shares()
+    
+    results = []
+    processed = 0
+    
+    for share in shares[:100]:  # Ограничиваем для скорости
+        try:
+            if interval == 7:
+                # Недельки - загружаем дневки и ресемплим
+                df = await moex_client.get_candles(
+                    'stock', 'shares', 'TQBR', share.ticker,
+                    interval=24,  # Дневки
+                    days_back=200 * 7  # ~4 года для 200 недель
+                )
+                if len(df) > 0:
+                    df = resample_to_weekly(df)
+            elif interval == 24:
+                # Дневки
+                df = await moex_client.get_candles(
+                    'stock', 'shares', 'TQBR', share.ticker,
+                    interval=24,
+                    days_back=200 * 2  # ~400 дней для 200 свечей
+                )
+            else:
+                # Минутки
+                df = await moex_client.get_candles(
+                    'stock', 'shares', 'TQBR', share.ticker,
+                    interval=interval,
+                    days_back=15
+                )
+            
+            if len(df) < length:
+                continue
+            
+            # Расчёт канала
+            channel = calculate_linreg_channel(df, length=length, std_dev_mult=std_mult)
+            if not channel:
+                continue
+            
+            # Получаем текущую цену
+            price = await tinkoff_client.get_last_price(share.figi)
+            if not price or price <= 0:
+                continue
+            
+            # Расчёт расстояния до границ (в сигмах)
+            if channel['std'] > 0:
+                distance_to_upper = (channel['upper'] - price) / channel['std']
+                distance_to_lower = (price - channel['lower']) / channel['std']
+                
+                # Минимальное расстояние до границы
+                min_distance = min(abs(distance_to_upper), abs(distance_to_lower))
+                
+                # Определяем к какой границе ближе
+                if distance_to_upper < distance_to_lower:
+                    direction = "↑"  # Ближе к верхней
+                    boundary = channel['upper']
+                    distance_pct = (boundary - price) / price * 100
+                else:
+                    direction = "↓"  # Ближе к нижней
+                    boundary = channel['lower']
+                    distance_pct = (price - boundary) / price * 100
+                
+                # Статус
+                if price > channel['upper']:
+                    status = "🔺 ВЫШЕ"
+                elif price < channel['lower']:
+                    status = "🔻 НИЖЕ"
+                else:
+                    status = f"{direction} {min_distance:.1f}σ"
+                
+                results.append({
+                    'ticker': share.ticker,
+                    'name': share.name[:20],
+                    'price': price,
+                    'upper': channel['upper'],
+                    'lower': channel['lower'],
+                    'regression': channel['regression'],
+                    'distance_sigma': min_distance,
+                    'distance_pct': distance_pct,
+                    'status': status,
+                    'slope': channel['slope']
+                })
+            
+            processed += 1
+            
+            # Пауза чтобы не превысить лимиты
+            if processed % 10 == 0:
+                await asyncio.sleep(0.5)
+                
+        except Exception as e:
+            logger.debug(f"Error analyzing {share.ticker}: {e}")
+            continue
+    
+    if not results:
+        return f"❌ Не удалось проанализировать инструменты на {interval_name}"
+    
+    # Сортируем по расстоянию до границы (ближайшие первые)
+    results.sort(key=lambda x: x['distance_sigma'])
+    
+    # Формируем сообщение
+    lines = [
+        f"📊 <b>ТОП-{top_n} БЛИЖАЙШИХ К ГРАНИЦАМ</b>",
+        f"📈 Таймфрейм: {interval_name} | Длина: {length} | ±{std_mult}σ\n"
+    ]
+    
+    # Разделяем на тех кто уже за границей и кто внутри
+    outside = [r for r in results if '🔺' in r['status'] or '🔻' in r['status']]
+    inside = [r for r in results if '🔺' not in r['status'] and '🔻' not in r['status']]
+    
+    if outside:
+        lines.append(f"<b>🚨 УЖЕ ЗА ГРАНИЦАМИ ({len(outside)}):</b>")
+        for r in outside[:10]:
+            trend = "📈" if r['slope'] > 0 else "📉"
+            lines.append(f"  {r['status']} <b>{r['ticker']}</b> | {r['price']:.2f} {trend}")
+        if len(outside) > 10:
+            lines.append(f"  ... и ещё {len(outside) - 10}")
+        lines.append("")
+    
+    lines.append(f"<b>📍 БЛИЖАЙШИЕ К ГРАНИЦАМ:</b>")
+    for i, r in enumerate(inside[:top_n], 1):
+        trend = "📈" if r['slope'] > 0 else "📉"
+        lines.append(
+            f"{i}. <b>{r['ticker']}</b> | {r['price']:.2f} | "
+            f"{r['status']} | до границы {r['distance_pct']:.1f}% {trend}"
+        )
+    
+    lines.append(f"\n<i>Проанализировано: {processed} инструментов</i>")
+    
+    return "\n".join(lines)
+
+
+def resample_to_weekly(df: pd.DataFrame) -> pd.DataFrame:
+    """Ресемплинг дневных свечей в недельные."""
+    if df.empty:
+        return df
+    
+    df = df.copy()
+    df['begin'] = pd.to_datetime(df['begin'])
+    df = df.set_index('begin')
+    
+    # Ресемплинг по неделям (понедельник - начало недели)
+    weekly = df.resample('W-MON').agg({
+        'open': 'first',
+        'high': 'max',
+        'low': 'min',
+        'close': 'last',
+        'volume': 'sum' if 'volume' in df.columns else 'first'
+    }).dropna()
+    
+    return weekly.reset_index()
+
+
 @router.message(Command("check"))
 async def cmd_check(message: Message):
     """Проверка расчёта канала для тестовых инструментов."""
@@ -112,8 +335,8 @@ async def cmd_check(message: Message):
     
     # Получаем figi для тикеров
     shares = await tinkoff_client.get_all_shares()
-    ticker_to_figi = {s['ticker']: s['figi'] for s in shares}
-    ticker_to_name = {s['ticker']: s['name'] for s in shares}
+    ticker_to_figi = {s.ticker: s.figi for s in shares}
+    ticker_to_name = {s.ticker: s.name for s in shares}
     
     results = []
     for ticker in test_tickers:
@@ -190,21 +413,21 @@ async def cmd_ticker(message: Message):
     
     # Ищем среди акций
     shares = await tinkoff_client.get_all_shares()
-    found = next((s for s in shares if s['ticker'] == ticker), None)
+    found = next((s for s in shares if s.ticker == ticker), None)
     instr_type = "акция"
     
     # Если не нашли среди акций, ищем среди фьючерсов
     if not found:
         futures = await tinkoff_client.get_all_futures(exclude_stock_futures=False, nearest_only=False)
-        found = next((f for f in futures if f['ticker'] == ticker), None)
+        found = next((f for f in futures if f.ticker == ticker), None)
         instr_type = "фьючерс"
     
     if not found:
         await message.answer(f"❌ Тикер {ticker} не найден!")
         return
     
-    figi = found['figi']
-    name = found['name']
+    figi = found.figi
+    name = found.name
     
     try:
         # Гибридная загрузка: MOEX + Tinkoff
@@ -330,13 +553,13 @@ async def load_instruments():
     try:
         # Получаем figi->ticker из Tinkoff
         shares_tinkoff = await tinkoff_client.get_all_shares()
-        ticker_to_figi = {s['ticker']: s['figi'] for s in shares_tinkoff}
-        ticker_to_name = {s['ticker']: s['name'] for s in shares_tinkoff}
+        ticker_to_figi = {s.ticker: s.figi for s in shares_tinkoff}
+        ticker_to_name = {s.ticker: s.name for s in shares_tinkoff}
         
         futures_tinkoff = await tinkoff_client.get_all_futures()
         for f in futures_tinkoff:
-            ticker_to_figi[f['ticker']] = f['figi']
-            ticker_to_name[f['ticker']] = f['name']
+            ticker_to_figi[f.ticker] = f.figi
+            ticker_to_name[f.ticker] = f.name
         
         logger.info(f"Tinkoff: {len(shares_tinkoff)} shares, {len(futures_tinkoff)} futures")
         
@@ -835,6 +1058,24 @@ async def send_signal(ticker, data, price, signal_type):
     channel_width = data['upper'] - data['lower']
     channel_pct = (channel_width / regression * 100) if regression else 0
     
+    # Изменение цены
+    closes_299 = data.get('closes_299')
+    price_change_str = ""
+    if closes_299 is not None and len(closes_299) > 0:
+        # Изменение от предыдущей свечи
+        prev_close = closes_299[-1]
+        change_abs = price - prev_close
+        change_pct = (change_abs / prev_close * 100) if prev_close else 0
+        change_emoji = "📈" if change_abs > 0 else "📉" if change_abs < 0 else "➡️"
+        price_change_str = f"{change_emoji} Изменение: {change_abs:+.2f} ({change_pct:+.2f}%)\n"
+        
+        # Изменение за 10 свечей (если есть данные)
+        if len(closes_299) >= 10:
+            price_10_ago = closes_299[-10]
+            change_10_abs = price - price_10_ago
+            change_10_pct = (change_10_abs / price_10_ago * 100) if price_10_ago else 0
+            price_change_str += f"📊 За 10 свечей: {change_10_abs:+.2f} ({change_10_pct:+.2f}%)\n"
+    
     # Оборот последней свечи в рублях
     last_volume = data.get('last_volume', 0)
     last_candle_price = data.get('last_candle_price', price)
@@ -853,6 +1094,7 @@ async def send_signal(ticker, data, price, signal_type):
         f"{type_emoji} <b>{ticker}</b> | {data.get('name', '')}\n"
         f"📋 {type_name}\n\n"
         f"💰 <b>Цена: {price:.2f}</b>\n"
+        f"{price_change_str}"
         f"📊 Регрессия: {regression:.2f} ({deviation_pct:+.1f}%)\n"
         f"⬆️ Верх (+3.5σ): {data['upper']:.2f}\n"
         f"⬇️ Низ (-3.5σ): {data['lower']:.2f}\n"

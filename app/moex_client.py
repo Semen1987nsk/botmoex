@@ -2,7 +2,10 @@ import aiohttp
 import pandas as pd
 import datetime
 import asyncio
+import logging
 from . import config
+
+logger = logging.getLogger(__name__)
 
 BASE_URL = "https://iss.moex.com/iss"
 
@@ -57,59 +60,67 @@ class MoexClient:
 
     async def get_candles(self, engine, market, board, symbol, interval=1, fetch_bars=500, days_back=None):
         """
-        Скачивает свечи.
+        Скачивает свечи с пагинацией.
         interval: 1 (1 мин), 10 (10 мин), 60 (1 час), 24 (1 день)
         """
         url = f"{BASE_URL}/engines/{engine}/markets/{market}/boards/{board}/securities/{symbol}/candles.json"
         
-        # Determine start date
-        # MOEX default limit is 500.
-        # If interval=1, 1 day = ~840 candles (14h * 60). So 1 day > 500 limit.
-        # If interval=10, 1 day = ~84 candles. 500 candles = ~6 days.
-        
         if days_back is None:
-            # Default logic
             if interval == 1:
-                # For 1 min, we likely just want recent data or need to handle paging. 
-                # If we want 200 bars history: 200 mins = 3.5 hours.
-                # Let's verify 'fetch_bars' intent. 
-                # If we want JUST the latest price, we should ask for very recent.
-                days_back = 0 # Today
+                days_back = 1
             elif interval == 10:
-                days_back = 4 # Enough for 200 bars (needs ~2.5 days)
+                days_back = 15
+            elif interval == 24:
+                days_back = 500  # ~1.5 года для дневок
             else:
-                days_back = 7
-        
-        # If days_back=0, use today's date
-        # If we need to go back specific hours, datetime math is needed.
-        # MOEX `from` param expects YYYY-MM-DD usually, or full datetime? 
-        # Documentation says "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS".
+                days_back = 30
         
         start_dt = datetime.datetime.now() - datetime.timedelta(days=days_back)
         start_date_str = start_dt.strftime('%Y-%m-%d')
         
-        params = {
-            'interval': interval,
-            'from': start_date_str
-        }
+        all_rows = []
+        cols = []
+        start_offset = 0
         
         try:
-            data = await self.get_json(url, params=params)
-            cols = data['candles']['columns']
-            rows = data['candles']['data']
-            df = pd.DataFrame(rows, columns=cols)
+            # Пагинация для получения всех свечей
+            while True:
+                params = {
+                    'interval': interval,
+                    'from': start_date_str,
+                    'start': start_offset
+                }
+                
+                data = await self.get_json(url, params=params)
+                cols = data['candles']['columns']
+                rows = data['candles']['data']
+                
+                if not rows:
+                    break
+                
+                all_rows.extend(rows)
+                
+                # MOEX возвращает максимум 500 свечей за запрос
+                if len(rows) < 500:
+                    break
+                
+                start_offset += len(rows)
             
-            # If we got data, format it
-            if not df.empty:
-                df['begin'] = pd.to_datetime(df['begin'])
-                df['close'] = pd.to_numeric(df['close'])
-                df['open'] = pd.to_numeric(df['open'])
-                df['high'] = pd.to_numeric(df['high'])
-                df['low'] = pd.to_numeric(df['low'])
+            if not all_rows:
+                return pd.DataFrame()
+            
+            df = pd.DataFrame(all_rows, columns=cols)
+            df['begin'] = pd.to_datetime(df['begin'])
+            df['close'] = pd.to_numeric(df['close'])
+            df['open'] = pd.to_numeric(df['open'])
+            df['high'] = pd.to_numeric(df['high'])
+            df['low'] = pd.to_numeric(df['low'])
+            if 'volume' not in df.columns and 'value' in df.columns:
+                df['volume'] = df['value']
             
             return df
         except Exception as e:
-            print(f"Error fetching {symbol}: {e}")
+            logger.error(f"Error fetching {symbol}: {e}")
             return pd.DataFrame()
 
     async def get_candles_until_today(self, engine, market, board, symbol, interval=10, days_back=10):
@@ -154,7 +165,7 @@ class MoexClient:
                 start_offset += len(rows)
                 
             except Exception as e:
-                print(f"Error fetching history for {symbol}: {e}")
+                logger.error(f"Error fetching history for {symbol}: {e}")
                 break
         
         if not all_rows:

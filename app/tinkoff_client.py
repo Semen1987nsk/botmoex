@@ -1,268 +1,318 @@
-import asyncio
-import pandas as pd
-import datetime
-from tinkoff.invest import AsyncClient, CandleInterval
-from tinkoff.invest.schemas import CandleSource
+"""Клиент Tinkoff Invest API (REST) для получения real-time данных."""
+from __future__ import annotations
 
-INTERVAL_MAPPING = {
-    1: CandleInterval.CANDLE_INTERVAL_1_MIN,
-    5: CandleInterval.CANDLE_INTERVAL_5_MIN,
-    10: CandleInterval.CANDLE_INTERVAL_10_MIN,
-    15: CandleInterval.CANDLE_INTERVAL_15_MIN,
-    60: CandleInterval.CANDLE_INTERVAL_HOUR
-}
+import asyncio
+import datetime
+import logging
+from collections import defaultdict
+from dataclasses import dataclass
+from typing import Any
+
+import aiohttp
+import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+BASE_URL = "https://invest-public-api.tinkoff.ru/rest"
+
+
+@dataclass
+class InstrumentInfo:
+    """Информация об инструменте."""
+    figi: str
+    ticker: str
+    name: str
+    instrument_type: str  # share, future, bond
 
 
 class TinkoffClient:
-    def __init__(self, token):
-        self.token = token
-        self._candles_cache = {}  # Кэш: {figi: {'df': DataFrame, 'last_time': datetime}}
+    """Асинхронный клиент для Tinkoff Invest REST API."""
+    
+    def __init__(self, token: str) -> None:
+        self._token = token
+        self._session: aiohttp.ClientSession | None = None
+        self._candles_cache: dict[str, Any] = {}
 
-    async def get_all_shares(self, only_rub=True):
-        """Получить все акции. only_rub=True - только рублёвые (MOEX)."""
-        async with AsyncClient(self.token) as client:
-            instruments = await client.instruments.shares(instrument_status=1)
-            result = []
-            for i in instruments.instruments:
-                if only_rub and i.currency != 'rub':
+    def _get_headers(self) -> dict[str, str]:
+        """Получить заголовки для запроса."""
+        return {
+            "Authorization": f"Bearer {self._token}",
+            "Content-Type": "application/json",
+            "accept": "application/json",
+        }
+
+    async def _ensure_session(self) -> aiohttp.ClientSession:
+        """Получить или создать сессию."""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        return self._session
+
+    async def close(self) -> None:
+        """Закрыть сессию."""
+        if self._session and not self._session.closed:
+            await self._session.close()
+
+    async def _post(self, endpoint: str, data: dict[str, Any]) -> dict[str, Any]:
+        """Выполнить POST запрос."""
+        session = await self._ensure_session()
+        url = f"{BASE_URL}{endpoint}"
+        
+        async with session.post(url, json=data, headers=self._get_headers()) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                logger.error(f"API error {resp.status}: {text}")
+                return {}
+            return await resp.json()
+
+    def _parse_quotation(self, quotation: dict[str, Any]) -> float:
+        """Преобразовать Quotation в float."""
+        if not quotation:
+            return 0.0
+        units = int(quotation.get("units", 0))
+        nano = int(quotation.get("nano", 0))
+        return units + nano / 1e9
+
+    async def get_all_shares(self, only_rub: bool = True) -> list[InstrumentInfo]:
+        """Получить все акции."""
+        data = await self._post(
+            "/tinkoff.public.invest.api.contract.v1.InstrumentsService/Shares",
+            {"instrumentStatus": "INSTRUMENT_STATUS_BASE"}
+        )
+        
+        result: list[InstrumentInfo] = []
+        for item in data.get("instruments", []):
+            if only_rub and item.get("currency") != "rub":
+                continue
+            result.append(InstrumentInfo(
+                figi=item.get("figi", ""),
+                ticker=item.get("ticker", ""),
+                name=item.get("name", ""),
+                instrument_type="share"
+            ))
+        return result
+
+    async def get_all_futures(
+        self,
+        exclude_stock_futures: bool = True,
+        nearest_only: bool = True
+    ) -> list[InstrumentInfo]:
+        """Получить фьючерсы."""
+        data = await self._post(
+            "/tinkoff.public.invest.api.contract.v1.InstrumentsService/Futures",
+            {"instrumentStatus": "INSTRUMENT_STATUS_BASE"}
+        )
+        
+        futures_list: list[dict[str, Any]] = []
+        for item in data.get("instruments", []):
+            if exclude_stock_futures:
+                asset_type = item.get("assetType", "")
+                if "SECURITY" in str(asset_type).upper():
                     continue
-                result.append({
-                    'figi': i.figi, 
-                    'ticker': i.ticker, 
-                    'name': i.name, 
-                    'type': 'share'
-                })
+            
+            futures_list.append({
+                "figi": item.get("figi", ""),
+                "ticker": item.get("ticker", ""),
+                "name": item.get("name", ""),
+                "basic_asset": item.get("basicAsset", ""),
+                "expiration": item.get("expirationDate", "9999-12-31")
+            })
+        
+        if nearest_only:
+            by_asset: dict[str, list[dict[str, Any]]] = defaultdict(list)
+            for f in futures_list:
+                by_asset[f["basic_asset"]].append(f)
+            
+            result: list[InstrumentInfo] = []
+            for contracts in by_asset.values():
+                nearest = min(contracts, key=lambda x: x["expiration"])
+                result.append(InstrumentInfo(
+                    figi=nearest["figi"],
+                    ticker=nearest["ticker"],
+                    name=nearest["name"],
+                    instrument_type="future"
+                ))
             return result
+        
+        return [
+            InstrumentInfo(
+                figi=f["figi"],
+                ticker=f["ticker"],
+                name=f["name"],
+                instrument_type="future"
+            )
+            for f in futures_list
+        ]
 
-    async def get_all_futures(self, exclude_stock_futures=True, nearest_only=True):
-        """
-        Получить фьючерсы.
-        exclude_stock_futures=True - убирает фьючерсы на акции
-        nearest_only=True - оставляет только ближайший контракт по каждому базовому активу
-        """
-        async with AsyncClient(self.token) as client:
-            instruments = await client.instruments.futures(instrument_status=1)
-            
-            # Собираем все подходящие фьючерсы
-            futures_list = []
-            for i in instruments.instruments:
-                # Фильтр по типу актива
-                if exclude_stock_futures:
-                    asset_type = str(i.asset_type) if hasattr(i.asset_type, 'name') else i.asset_type
-                    if 'SECURITY' in str(asset_type).upper():
-                        continue
-                
-                futures_list.append({
-                    'figi': i.figi,
-                    'ticker': i.ticker,
-                    'name': i.name,
-                    'type': 'future',
-                    'basic_asset': i.basic_asset,
-                    'expiration': i.expiration_date
-                })
-            
-            # Если нужны только ближайшие - группируем по базовому активу
-            if nearest_only:
-                from collections import defaultdict
-                by_asset = defaultdict(list)
-                for f in futures_list:
-                    by_asset[f['basic_asset']].append(f)
-                
-                # Выбираем ближайший по дате экспирации
-                result = []
-                for asset, contracts in by_asset.items():
-                    nearest = min(contracts, key=lambda x: x['expiration'])
-                    result.append({
-                        'figi': nearest['figi'],
-                        'ticker': nearest['ticker'],
-                        'name': nearest['name'],
-                        'type': 'future'
-                    })
-                return result
-            
-            return [{'figi': f['figi'], 'ticker': f['ticker'], 'name': f['name'], 'type': 'future'} for f in futures_list]
-
-    async def get_all_bonds(self):
+    async def get_all_bonds(self) -> list[InstrumentInfo]:
         """Получить все облигации."""
-        async with AsyncClient(self.token) as client:
-            instruments = await client.instruments.bonds(instrument_status=1)
-            return [
-                {'figi': i.figi, 'ticker': i.ticker, 'name': i.name, 'type': 'bond'} 
-                for i in instruments.instruments
-            ]
+        data = await self._post(
+            "/tinkoff.public.invest.api.contract.v1.InstrumentsService/Bonds",
+            {"instrumentStatus": "INSTRUMENT_STATUS_BASE"}
+        )
+        
+        return [
+            InstrumentInfo(
+                figi=item.get("figi", ""),
+                ticker=item.get("ticker", ""),
+                name=item.get("name", ""),
+                instrument_type="bond"
+            )
+            for item in data.get("instruments", [])
+        ]
 
-    async def get_candles_exchange(self, figi, interval_mins=10, period_days=10, max_retries=3):
-        """
-        Получить биржевые свечи (EXCHANGE) за последние N дней.
-        Время в МСК. Это основной метод для расчёта каналов.
-        """
-        tf = INTERVAL_MAPPING.get(interval_mins, CandleInterval.CANDLE_INTERVAL_10_MIN)
+    async def get_candles_exchange(
+        self,
+        figi: str,
+        interval_mins: int = 10,
+        period_days: int = 10,
+        max_retries: int = 3
+    ) -> pd.DataFrame:
+        """Получить биржевые свечи за последние N дней."""
+        interval_map = {
+            1: "CANDLE_INTERVAL_1_MIN",
+            5: "CANDLE_INTERVAL_5_MIN",
+            10: "CANDLE_INTERVAL_10_MIN",
+            15: "CANDLE_INTERVAL_15_MIN",
+            60: "CANDLE_INTERVAL_HOUR",
+        }
+        interval = interval_map.get(interval_mins, "CANDLE_INTERVAL_10_MIN")
+        
         now = datetime.datetime.now(datetime.timezone.utc)
         start = now - datetime.timedelta(days=period_days)
         
         for attempt in range(max_retries):
             try:
-                candles_list = []
-                async with AsyncClient(self.token) as client:
-                    async for candle in client.get_all_candles(
-                        figi=figi,
-                        from_=start,
-                        to=now,
-                        interval=tf,
-                        candle_source_type=CandleSource.CANDLE_SOURCE_EXCHANGE
-                    ):
-                        # Конвертируем UTC -> МСК
-                        msk_time = candle.time + datetime.timedelta(hours=3)
-                        candles_list.append({
-                            'begin': msk_time.replace(tzinfo=None),
-                            'open': candle.open.units + candle.open.nano / 1e9,
-                            'close': candle.close.units + candle.close.nano / 1e9,
-                            'high': candle.high.units + candle.high.nano / 1e9,
-                            'low': candle.low.units + candle.low.nano / 1e9,
-                            'volume': candle.volume
-                        })
+                data = await self._post(
+                    "/tinkoff.public.invest.api.contract.v1.MarketDataService/GetCandles",
+                    {
+                        "figi": figi,
+                        "from": start.isoformat(),
+                        "to": now.isoformat(),
+                        "interval": interval,
+                        "candleSourceType": "CANDLE_SOURCE_EXCHANGE"
+                    }
+                )
+                
+                candles_list: list[dict[str, Any]] = []
+                for candle in data.get("candles", []):
+                    time_str = candle.get("time", "")
+                    if time_str:
+                        candle_time = datetime.datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+                        msk_time = candle_time + datetime.timedelta(hours=3)
+                    else:
+                        msk_time = datetime.datetime.now()
+                    
+                    candles_list.append({
+                        "begin": msk_time.replace(tzinfo=None),
+                        "open": self._parse_quotation(candle.get("open", {})),
+                        "close": self._parse_quotation(candle.get("close", {})),
+                        "high": self._parse_quotation(candle.get("high", {})),
+                        "low": self._parse_quotation(candle.get("low", {})),
+                        "volume": int(candle.get("volume", 0))
+                    })
                 
                 df = pd.DataFrame(candles_list)
                 if len(df) > 0:
-                    df = df.sort_values('begin').reset_index(drop=True)
+                    df = df.sort_values("begin").reset_index(drop=True)
                 return df
                 
             except Exception as e:
-                if 'RESOURCE_EXHAUSTED' in str(e):
-                    wait_time = (attempt + 1) * 5
-                    await asyncio.sleep(wait_time)
-                else:
-                    raise
+                logger.warning(f"Error getting candles (attempt {attempt + 1}): {e}")
+                await asyncio.sleep((attempt + 1) * 2)
         
         return pd.DataFrame()
 
-    async def get_candles(self, figi, interval_mins=10, period_days=10, max_retries=3):
-        """Получить свечи за последние N дней с кэшированием и retry."""
-        tf = INTERVAL_MAPPING.get(interval_mins, CandleInterval.CANDLE_INTERVAL_10_MIN)
-        now = datetime.datetime.now(datetime.timezone.utc)
-        
-        cache_key = f"{figi}_{interval_mins}"
-        cached = self._candles_cache.get(cache_key)
-        
-        # Если есть кэш — загружаем только новые свечи
-        if cached and cached['df'] is not None and len(cached['df']) > 0:
-            last_time = cached['last_time']
-            # Загружаем с последней свечи + небольшой запас
-            start = last_time - datetime.timedelta(minutes=interval_mins * 2)
-        else:
-            start = now - datetime.timedelta(days=period_days)
-        
-        for attempt in range(max_retries):
-            try:
-                candles_list = []
-                async with AsyncClient(self.token) as client:
-                    async for candle in client.get_all_candles(
-                        figi=figi,
-                        from_=start,
-                        to=now,
-                        interval=tf,
-                        candle_source_type=CandleSource.CANDLE_SOURCE_EXCHANGE
-                    ):
-                        candles_list.append({
-                            'begin': candle.time,
-                            'open': candle.open.units + candle.open.nano / 1e9,
-                            'close': candle.close.units + candle.close.nano / 1e9,
-                            'high': candle.high.units + candle.high.nano / 1e9,
-                            'low': candle.low.units + candle.low.nano / 1e9,
-                            'volume': candle.volume
-                        })
-                
-                new_df = pd.DataFrame(candles_list)
-                
-                # Объединяем с кэшем
-                if cached and cached['df'] is not None and len(cached['df']) > 0 and len(new_df) > 0:
-                    # Объединяем старые + новые, убираем дубликаты
-                    combined = pd.concat([cached['df'], new_df])
-                    combined = combined.drop_duplicates(subset=['begin'], keep='last')
-                    combined = combined.sort_values('begin').reset_index(drop=True)
-                    # Оставляем только последние N дней
-                    cutoff = now - datetime.timedelta(days=period_days)
-                    combined = combined[combined['begin'] >= cutoff]
-                    result_df = combined
-                else:
-                    result_df = new_df
-                
-                # Обновляем кэш
-                if len(result_df) > 0:
-                    self._candles_cache[cache_key] = {
-                        'df': result_df,
-                        'last_time': result_df['begin'].max()
-                    }
-                
-                return result_df
-                
-            except Exception as e:
-                if 'RESOURCE_EXHAUSTED' in str(e):
-                    wait_time = (attempt + 1) * 5  # 5, 10, 15 секунд (более длинное ожидание)
-                    await asyncio.sleep(wait_time)
-                else:
-                    raise
-        
-        # При неудаче возвращаем кэш если есть
-        if cached and cached['df'] is not None:
-            return cached['df']
-        return pd.DataFrame()
+    async def get_candles(
+        self,
+        figi: str,
+        interval_mins: int = 10,
+        period_days: int = 10,
+        max_retries: int = 3
+    ) -> pd.DataFrame:
+        """Получить свечи (алиас для get_candles_exchange)."""
+        return await self.get_candles_exchange(figi, interval_mins, period_days, max_retries)
 
-    async def get_candles_today_only(self, figi, interval_mins=10, max_retries=3):
-        """Получить только сегодняшние свечи через Tinkoff (для гибридной загрузки)."""
-        tf = INTERVAL_MAPPING.get(interval_mins, CandleInterval.CANDLE_INTERVAL_10_MIN)
+    async def get_candles_today_only(
+        self,
+        figi: str,
+        interval_mins: int = 10,
+        max_retries: int = 3
+    ) -> pd.DataFrame:
+        """Получить только сегодняшние свечи."""
+        interval_map = {
+            1: "CANDLE_INTERVAL_1_MIN",
+            5: "CANDLE_INTERVAL_5_MIN",
+            10: "CANDLE_INTERVAL_10_MIN",
+            15: "CANDLE_INTERVAL_15_MIN",
+            60: "CANDLE_INTERVAL_HOUR",
+        }
+        interval = interval_map.get(interval_mins, "CANDLE_INTERVAL_10_MIN")
+        
         now = datetime.datetime.now(datetime.timezone.utc)
-        # Начало сегодняшнего дня в UTC
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         
         for attempt in range(max_retries):
             try:
-                candles_list = []
-                async with AsyncClient(self.token) as client:
-                    async for candle in client.get_all_candles(
-                        figi=figi,
-                        from_=today_start,
-                        to=now,
-                        interval=tf,
-                        candle_source_type=CandleSource.CANDLE_SOURCE_EXCHANGE
-                    ):
-                        # Конвертируем UTC -> МСК (для совместимости с MOEX)
-                        msk_time = candle.time + datetime.timedelta(hours=3)
-                        candles_list.append({
-                            'begin': msk_time.replace(tzinfo=None),  # Убираем timezone для совместимости
-                            'open': candle.open.units + candle.open.nano / 1e9,
-                            'close': candle.close.units + candle.close.nano / 1e9,
-                            'high': candle.high.units + candle.high.nano / 1e9,
-                            'low': candle.low.units + candle.low.nano / 1e9,
-                            'volume': candle.volume
-                        })
-                        
+                data = await self._post(
+                    "/tinkoff.public.invest.api.contract.v1.MarketDataService/GetCandles",
+                    {
+                        "figi": figi,
+                        "from": today_start.isoformat(),
+                        "to": now.isoformat(),
+                        "interval": interval,
+                        "candleSourceType": "CANDLE_SOURCE_EXCHANGE"
+                    }
+                )
+                
+                candles_list: list[dict[str, Any]] = []
+                for candle in data.get("candles", []):
+                    time_str = candle.get("time", "")
+                    if time_str:
+                        candle_time = datetime.datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+                        msk_time = candle_time + datetime.timedelta(hours=3)
+                    else:
+                        msk_time = datetime.datetime.now()
+                    
+                    candles_list.append({
+                        "begin": msk_time.replace(tzinfo=None),
+                        "open": self._parse_quotation(candle.get("open", {})),
+                        "close": self._parse_quotation(candle.get("close", {})),
+                        "high": self._parse_quotation(candle.get("high", {})),
+                        "low": self._parse_quotation(candle.get("low", {})),
+                        "volume": int(candle.get("volume", 0))
+                    })
+                
                 return pd.DataFrame(candles_list)
                 
             except Exception as e:
-                if 'RESOURCE_EXHAUSTED' in str(e):
-                    wait_time = (attempt + 1) * 5
-                    await asyncio.sleep(wait_time)
-                else:
-                    raise
+                logger.warning(f"Error getting today candles (attempt {attempt + 1}): {e}")
+                await asyncio.sleep((attempt + 1) * 2)
         
         return pd.DataFrame()
 
-    async def get_last_price(self, figi):
-        """Получить последнюю цену (real-time)."""
-        async with AsyncClient(self.token) as client:
-            resp = await client.market_data.get_last_prices(figi=[figi])
-            if resp.last_prices:
-                lp = resp.last_prices[0]
-                return lp.price.units + lp.price.nano / 1e9
+    async def get_last_price(self, figi: str) -> float | None:
+        """Получить последнюю цену."""
+        data = await self._post(
+            "/tinkoff.public.invest.api.contract.v1.MarketDataService/GetLastPrices",
+            {"figi": [figi]}
+        )
+        
+        prices = data.get("lastPrices", [])
+        if prices:
+            return self._parse_quotation(prices[0].get("price", {}))
         return None
 
-    async def get_last_prices_batch(self, figis):
-        """Получить последние цены для списка инструментов (до 100)."""
-        result = {}
-        async with AsyncClient(self.token) as client:
-            resp = await client.market_data.get_last_prices(figi=figis)
-            for lp in resp.last_prices:
-                price = lp.price.units + lp.price.nano / 1e9
-                result[lp.figi] = price
+    async def get_last_prices_batch(self, figis: list[str]) -> dict[str, float]:
+        """Получить последние цены для списка инструментов."""
+        data = await self._post(
+            "/tinkoff.public.invest.api.contract.v1.MarketDataService/GetLastPrices",
+            {"figi": figis}
+        )
+        
+        result: dict[str, float] = {}
+        for item in data.get("lastPrices", []):
+            figi = item.get("figi", "")
+            price = self._parse_quotation(item.get("price", {}))
+            if figi and price > 0:
+                result[figi] = price
         return result
